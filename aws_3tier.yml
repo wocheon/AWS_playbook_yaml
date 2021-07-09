@@ -1,3 +1,24 @@
+#====사전작업====
+#-필요 패키지
+#ansible, python-pip 
+
+##-설치완료후
+#pip install --upgrade
+
+#pip install boto
+#pip install botocore
+
+#AWS 콘솔에서 ACCESS_KEY를 발급받아두기
+
+#엑셀파일을 열어서 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY를 확인
+#사용할 리전을 확인 (서울인경우 ap-northeast-2 [a,b,c,d] )
+
+#모듈사용에 필요한 변수를 선언하기
+
+#export AWS_ACCESS_KEY_ID=xxxxx
+#export AWS_SECRET_ACCESS_KEY=xxxx
+#export AWS_REGION=xxxx
+
 ---
 - name: aws ec2 3tier architecture
   hosts: localhost
@@ -6,18 +27,17 @@
   tasks:
 
 #vpc 생성 
-
   - name : vpc
     ec2_vpc_net:
-      name: vpc
+      name: ansible_pb_vpc
       cidr_block: 172.16.0.0/16
       tags:
-        name: ansiblevpc
+        Name: ansiblevpc
       state: present
     register: vpc_create_result
 #register: 결과값을 저장하여 이후 작업에 변수로서 사용
 
-#igw 생성
+#Internet Gateway 생성
   - name: igw
     ec2_vpc_igw:
 #vpc생성시 받은 변수를 사용해서 vpc를 지정
@@ -30,31 +50,31 @@
 
 #subnet 생성
 #구성
-#1.subnet1
-#2.subnet2
-#3.rdssubnet1, rds subnet2
+#1.ext_subnet : 172.16.1.0/24
+#2.web_subnet : 172.16.2.0/24
+#3.rdssubnet1, rds subnet2 : 172.16.10.0/24 172.16.20.0/24
 #rds_subnetgroup은 2개이상의 다른 Az에 속한subnet필요
 #그러므로 2개의 rds 서브넷을 생성
 
-  - name: subnet1
+  - name: ext_subnet
     ec2_vpc_subnet:
       cidr: 172.16.1.0/24
       vpc_id: "{{ vpc_create_result.vpc.id }}"
       az: ap-northeast-2c
       map_public: yes
       state: present
-    register: subnet_create_result
+    register: ext_subnet_result
 
-  - name: subnet2
+  - name: web_subnet
     ec2_vpc_subnet:
       cidr: 172.16.2.0/24
       vpc_id: "{{ vpc_create_result.vpc.id }}"
       az: ap-northeast-2c
       map_public: yes
       state: present
-    register: subnet_create_result
+    register: web_subnet_result
 
-  - name: rdssubnet1
+  - name: rds_subnet1
     ec2_vpc_subnet:
       cidr: 172.16.10.0/24
       vpc_id: "{{ vpc_create_result.vpc.id }}"
@@ -64,10 +84,10 @@
       map_public: yes
       state: present
       tags:
-        name: rdssubnet1
-    register: rdssubnet_create_result
+        name: rds_subnet1
+    register: rds_subnet1_result
 
-  - name: rdssubnet2
+  - name: rds_subnet2
     ec2_vpc_subnet:
       cidr: 172.16.20.0/24
       vpc_id: "{{ vpc_create_result.vpc.id }}"
@@ -75,8 +95,8 @@
       map_public: yes
       state: present
       tags:
-        name: rdssubnet2
-    register: rdssubnet2_create_result
+        name: rds_subnet2
+    register: rds_subnet2_result
 
 
 #Routing table 생성
@@ -86,7 +106,7 @@
     ec2_vpc_route_table:
       vpc_id: "{{ vpc_create_result.vpc.id }}"
       state: present
-      subnets: "{{ subnet_create_result.subnet.id }}"
+      subnets: "{{ ext_subnet_result.subnet.id }}"
       routes:
         - dest: 0.0.0.0/0
           gateway_id: "{{ igw_result.gateway_id }}"
@@ -94,23 +114,23 @@
 
 #Security_group생성
 #3개의 Security Group필요
-#1.sg1: igw와 연결된 서브넷에 적용
-#       80,22포트 개방
+#1.ext_sg: igw와 연결된 서브넷에 적용
+#       80,22포트 및 ICMP 개방, 모든 IP접속가능
 #
-#2.sg2: subnet1에서 ssh 및 HTTP접속이 가능하도록 설정
+#2.web_sg: subnet1에서 ssh 및 HTTP접속이 가능하도록 설정
 #       80,22 개방, cidr_ip를 subnet1의 대역으로 설정
 #
-#3.rdssg: subnet2에서 3306포트를 통해 rds접속
+#3.rds_sg: subnet2에서 3306포트를 통해 rds접속
 #         3306포트 개방, cidr_ip를 subnet2의 대역으로 설정
 
-  - name: sg1
+  - name: ext_sg
     ec2_group:
-      name: subnet1_sg
+      name: ext_sg
       vpc_id: "{{ vpc_create_result.vpc.id }}"
       state: present
       description: permit ssh, web
       tags:
-        name: subnet1_sg
+        name: ext_sg
       rules:
       - proto: tcp
         ports:
@@ -120,76 +140,162 @@
         ports:
         - 80
         cidr_ip: 0.0.0.0/0
-      - proto: tcp
+      - proto: icmp
         ports:
-        - 8080
-        cidr_ip: 0.0.0.0/0
-      - proto: tcp
-        ports:
-        - 8009
+        - -1
         cidr_ip: 0.0.0.0/0
 
+
+  - name: web_sg
+    ec2_group:
+      name: web_sg
+      vpc_id: "{{ vpc_create_result.vpc.id }}"
+      state: present
+      description: permit ssh, web from subnet1
+      tags:
+        name: web_sg
+      rules:
+      - proto: tcp
+        ports:
+        - 22
+        cidr_ip: 172.16.1.0/24
+      - proto: tcp
+        ports:
+        - 80
+        cidr_ip: 172.16.1.0/24
+      - proto: icmp
+        ports:
+        - -1
+        cidr_ip: 172.16.1.0/24
+
+  - name: rds_sg
+    ec2_group:
+      name: rds_sg
+      vpc_id: "{{ vpc_create_result.vpc.id }}"
+      state: present
+      description: permit 3306 from subnet2
+      tags:
+        name: rds_sg
+      rules:
+      - proto: tcp
+        ports:
+        - 3306
+        cidr_ip: 172.16.2.0/24
+    register: rds_sg_result
+  
+  - debug:
+      var: rds_sg_result
 
 #rds서브넷 그룹 생성
 #이전 과정에서 만들었던 2개의 rds subnet을 통해 생성
 #rds서브넷 그룹이 없는경우 rds 생성이 불가
 
-  - name: rds_subnet_ansible
+  - name: rds_subnet_group
     rds_subnet_group:
       state: present
-      name: rds_ansible
+      name: rds_group
       description: none
       region: ap-northeast-2
       subnets:
-      - "{{ rdssubnet_create_result.subnet.id }}"
-      - "{{ rdssubnet2_create_result.subnet.id }}"
+      - "{{ rds_subnet1_result.subnet.id }}"
+      - "{{ rds_subnet2_result.subnet.id }}"
     register: rds_subg_result
     
 #EC2 인스턴스 생성
 #총 3개의 인스턴스를 생성함
 #1. subnet1에 위치하는 subnet2의 webserver관리용 인스턴스
-#2. subnet2에 위치하는 webserver인스턴스
+#2. subnet2에 위치하는 webserver인스턴스(x2)
 #key값과 AMI  변경하여 사용
 
-  - name: instance1
+#1. 관리용 인스턴스 (MGMT)
+
+  - name: instance1(mgmt)
     ec2:
       key_name: aws-con2
       instance_tags:
-        name: instance1
+        name: EC2_MGMT
       image: ami-086a3601cd7a83590 
-      group: subnet1_sg
+      group: ext_sg
       wait: yes
       count: 1
-      vpc_subnet_id: "{{ subnet_create_result.subnet.id }}"
+      vpc_subnet_id: "{{ ext_subnet_result.subnet.id }}"
       assign_public_ip: yes
       instance_tags:
-        name: instance1
+        Name: mgmt_result
 
 
-  - name: instance2
+#2. Websrv용 인스턴스
+#   count를 2로 설정하여 2개가 동시에 만들어지도록 설정
+#   생성후 인터넷에 접속할수없으므로, 패키지 설치 불가능
+#   따로 httpd,php,mysql등의 패키지를 설치한뒤 AMI를 생성하여
+#   사용해야함
+
+  - name: instance1(web)
     ec2:
       key_name: aws-con2
       instance_tags:
-        name: instance2
+        name: EC2_websrv1
       image: ami-086a3601cd7a83590 
-      group: subnet2_sg
+      group: web_sg
       wait: yes
-      count: 2
-      vpc_subnet_id: "{{ subnet2_create_result.subnet.id }}"
+      count: 1
+      vpc_subnet_id: "{{ web_subnet_result.subnet.id }}"
       assign_public_ip: yes
       instance_tags:
-        name: instance2
+        Name: websrv1
+    register: websrv1_result
+
+  - name: instance2(web)
+    ec2:
+      key_name: aws-con2
+      instance_tags:
+        name: EC2_websrv2
+      image: ami-086a3601cd7a83590 
+      group: web_sg
+      wait: yes
+      count: 1
+      vpc_subnet_id: "{{ web_subnet_result.subnet.id }}"
+      assign_public_ip: yes
+      instance_tags:
+        Name: websrv2
+    register: websrv2_result
+
+#Load Balancer 생성
+#websrv에 연결되어 외부에서 접속시 웹서버로 부하분산 역할
+#80포트로 들어오면 80포트로 전달하도록 기본설정함
+
+  - name: elb test
+    ec2_elb_lb:
+      name: test
+      state: present
+      subnets: 
+        - "{{ ext_subnet_result.subnet.id }}"
+      instance_ids:
+        - "{{ websrv1_result.instance_ids }}" 
+        - "{{ websrv2_result.instance_ids }}" 
+      listeners:
+        - protocol: http
+          load_balancer_port: 80
+          instance_port: 80
+      tags:
+        Name: elb_test
+#RDS생성 
+#가장 뒷단에 위치하며 web서버만이 접근가능함
+#따로 백업해제는 옵션을 찾지못하였음
 
   - name: create rds
     rds:
       command: create
       instance_name: ansiblenewrds2
       db_engine: MySQL
-      size: 10 
+      size: 10
       instance_type: db.t2.micro
       username: admin
       password: test1234
       region: ap-northeast-2
       zone: ap-northeast-2c
-      subnet: rds_ansible
+      subnet: rds_group
+      vpc_security_groups: "{{ rds_sg_result.group_id }}"
       publicly_accessible: yes
+
+
