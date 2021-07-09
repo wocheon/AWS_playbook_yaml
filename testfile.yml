@@ -1,0 +1,45 @@
+---
+- name: aws ec2 3tier architecture
+  hosts: localhost
+  become: yes
+  gather_facts: no
+  tasks:
+
+#vpc 생성 
+  - name : vpc
+    ec2_vpc_net:
+      name: ansible_pb_vpc
+      cidr_block: 172.16.0.0/16
+      tags:
+        Name: ansiblevpc
+      state: present
+    register: vpc_create_result
+
+  - debug:
+      var: vpc_create_result
+  
+  - name: ext_subnet
+    ec2_vpc_subnet:
+      cidr: 172.16.1.0/24
+      vpc_id: "{{ vpc_create_result.vpc.id }}"
+      az: ap-northeast-2c
+      map_public: yes
+      state: present
+    register: ext_subnet_result
+
+  - name: web_subnet
+    ec2_vpc_subnet:
+      cidr: 172.16.2.0/24
+      vpc_id: "{{ vpc_create_result.vpc.id }}"
+      az: ap-northeast-2c
+      map_public: yes
+      state: present
+    register: web_subnet_result
+
+  - name: debug file
+    copy:
+      content:
+      - "{{ vpc_create_result.vpc.id }}"
+      - "{{ ext_subnet_result.subnet.id }}"   
+      - "{{ web_subnet_result.subnet.id }}"   
+      dest: "/root/aws_playbook/test_result"
