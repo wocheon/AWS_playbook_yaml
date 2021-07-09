@@ -20,7 +20,6 @@
       state: present
       tags:
         name: ansibleigw
-    register: igw_result
 
   - name: subnet1
     ec2_vpc_subnet:
@@ -29,17 +28,26 @@
       az: ap-northeast-2c
       map_public: yes
       state: present
+      resource_tags:
+        name: subnet1
     register: subnet_create_result
 
-  - name: routing table
-    ec2_vpc_route_table:
+  - name: subnet2
+    ec2_vpc_subnet:
+      cidr: 172.16.2.0/24
       vpc_id: "{{ vpc_create_result.vpc.id }}"
+      az: ap-northeast-2c
+      map_public: yes
       state: present
-      subnets: "{{ subnet_create_result.subnet.id }}"
-      routes:
-        - dest: 0.0.0.0/0
-          gateway_id: "{{ igw_result.gateway_id }}"
+      resource_tags:
+        name: subnet2
+    register: subnet2_create_result
 
+#  - name: routing table
+ #   ec2_vpc_route_table:
+  #    vpc_id: "{{ vpc_create_result.vpc.id }}"
+   #   state: present
+    #  subnets: "{{ subnet_create_result.subnet.id }}"
   - name: sg1
     ec2_group:
       name: subnet1_sg
@@ -57,14 +65,6 @@
         ports:
         - 80
         cidr_ip: 0.0.0.0/0
-      - proto: tcp
-        ports:
-        - 8080
-        cidr_ip: 0.0.0.0/0
-      - proto: tcp
-        ports:
-        - 8009
-        cidr_ip: 0.0.0.0/0
 
   - name: instance1
     ec2:
@@ -81,6 +81,38 @@
         name: instance1
     register: ec2
 
-  - debug:
+  - name: instance2
+    ec2:
+      key_name: aws-con2
+      instance_tags:
+        name: instance2
+      image: ami-086a3601cd7a83590 
+      group: subnet1_sg
+      wait: yes
+      count: 1
+      vpc_subnet_id: "{{ subnet_create_result.subnet.id }}"
+      assign_public_ip: yes
+      instance_tags:
+        name: instance2
+    register: ec22
+
+  - debug: 
       var: ec2
 
+  - name: elb test
+    ec2_elb_lb:
+      name: test
+      state: present
+      region: ap-northeast-2
+      zones:
+        - ap-northeast-2c
+      subnets: 
+        - "{{ subnet_create_result.subnet.id }}"
+      instance_ids: "{{ ec2.instance_ids }}" 
+      instance_ids: "{{ ec22.instance_ids }}" 
+      listeners:
+        - protocol: http
+          load_balancer_port: 80
+          instance_port: 80
+      tags:
+        name: elb_test
