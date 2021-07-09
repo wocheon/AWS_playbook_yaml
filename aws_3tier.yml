@@ -1,0 +1,195 @@
+---
+- name: aws ec2 3tier architecture
+  hosts: localhost
+  become: yes
+  gather_facts: no
+  tasks:
+
+#vpc 생성 
+
+  - name : vpc
+    ec2_vpc_net:
+      name: vpc
+      cidr_block: 172.16.0.0/16
+      tags:
+        name: ansiblevpc
+      state: present
+    register: vpc_create_result
+#register: 결과값을 저장하여 이후 작업에 변수로서 사용
+
+#igw 생성
+  - name: igw
+    ec2_vpc_igw:
+#vpc생성시 받은 변수를 사용해서 vpc를 지정
+      vpc_id: "{{ vpc_create_result.vpc.id }}"
+      state: present
+      tags:
+        name: ansibleigw
+    register: igw_result
+
+
+#subnet 생성
+#구성
+#1.subnet1
+#2.subnet2
+#3.rdssubnet1, rds subnet2
+#rds_subnetgroup은 2개이상의 다른 Az에 속한subnet필요
+#그러므로 2개의 rds 서브넷을 생성
+
+  - name: subnet1
+    ec2_vpc_subnet:
+      cidr: 172.16.1.0/24
+      vpc_id: "{{ vpc_create_result.vpc.id }}"
+      az: ap-northeast-2c
+      map_public: yes
+      state: present
+    register: subnet_create_result
+
+  - name: subnet2
+    ec2_vpc_subnet:
+      cidr: 172.16.2.0/24
+      vpc_id: "{{ vpc_create_result.vpc.id }}"
+      az: ap-northeast-2c
+      map_public: yes
+      state: present
+    register: subnet_create_result
+
+  - name: rdssubnet1
+    ec2_vpc_subnet:
+      cidr: 172.16.10.0/24
+      vpc_id: "{{ vpc_create_result.vpc.id }}"
+#2개이상의 Ability Zone에배치된서브넷을 만들기위해
+#하나는 ap-northeast-2a, 다른하나는 ap-northeast-2c로 생성
+      az: ap-northeast-2a
+      map_public: yes
+      state: present
+      tags:
+        name: rdssubnet1
+    register: rdssubnet_create_result
+
+  - name: rdssubnet2
+    ec2_vpc_subnet:
+      cidr: 172.16.20.0/24
+      vpc_id: "{{ vpc_create_result.vpc.id }}"
+      az: ap-northeast-2c
+      map_public: yes
+      state: present
+      tags:
+        name: rdssubnet2
+    register: rdssubnet2_create_result
+
+
+#Routing table 생성
+#IGW를 통해 인터넷 연결이 가능하도록
+#Routing table을 생성하여 연결
+  - name: routing table
+    ec2_vpc_route_table:
+      vpc_id: "{{ vpc_create_result.vpc.id }}"
+      state: present
+      subnets: "{{ subnet_create_result.subnet.id }}"
+      routes:
+        - dest: 0.0.0.0/0
+          gateway_id: "{{ igw_result.gateway_id }}"
+
+
+#Security_group생성
+#3개의 Security Group필요
+#1.sg1: igw와 연결된 서브넷에 적용
+#       80,22포트 개방
+#
+#2.sg2: subnet1에서 ssh 및 HTTP접속이 가능하도록 설정
+#       80,22 개방, cidr_ip를 subnet1의 대역으로 설정
+#
+#3.rdssg: subnet2에서 3306포트를 통해 rds접속
+#         3306포트 개방, cidr_ip를 subnet2의 대역으로 설정
+
+  - name: sg1
+    ec2_group:
+      name: subnet1_sg
+      vpc_id: "{{ vpc_create_result.vpc.id }}"
+      state: present
+      description: permit ssh, web
+      tags:
+        name: subnet1_sg
+      rules:
+      - proto: tcp
+        ports:
+        - 22
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        ports:
+        - 80
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        ports:
+        - 8080
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        ports:
+        - 8009
+        cidr_ip: 0.0.0.0/0
+
+
+#rds서브넷 그룹 생성
+#이전 과정에서 만들었던 2개의 rds subnet을 통해 생성
+#rds서브넷 그룹이 없는경우 rds 생성이 불가
+
+  - name: rds_subnet_ansible
+    rds_subnet_group:
+      state: present
+      name: rds_ansible
+      description: none
+      region: ap-northeast-2
+      subnets:
+      - "{{ rdssubnet_create_result.subnet.id }}"
+      - "{{ rdssubnet2_create_result.subnet.id }}"
+    register: rds_subg_result
+    
+#EC2 인스턴스 생성
+#총 3개의 인스턴스를 생성함
+#1. subnet1에 위치하는 subnet2의 webserver관리용 인스턴스
+#2. subnet2에 위치하는 webserver인스턴스
+#key값과 AMI  변경하여 사용
+
+  - name: instance1
+    ec2:
+      key_name: aws-con2
+      instance_tags:
+        name: instance1
+      image: ami-086a3601cd7a83590 
+      group: subnet1_sg
+      wait: yes
+      count: 1
+      vpc_subnet_id: "{{ subnet_create_result.subnet.id }}"
+      assign_public_ip: yes
+      instance_tags:
+        name: instance1
+
+
+  - name: instance2
+    ec2:
+      key_name: aws-con2
+      instance_tags:
+        name: instance2
+      image: ami-086a3601cd7a83590 
+      group: subnet2_sg
+      wait: yes
+      count: 2
+      vpc_subnet_id: "{{ subnet2_create_result.subnet.id }}"
+      assign_public_ip: yes
+      instance_tags:
+        name: instance2
+
+  - name: create rds
+    rds:
+      command: create
+      instance_name: ansiblenewrds2
+      db_engine: MySQL
+      size: 10 
+      instance_type: db.t2.micro
+      username: admin
+      password: test1234
+      region: ap-northeast-2
+      zone: ap-northeast-2c
+      subnet: rds_ansible
+      publicly_accessible: yes
